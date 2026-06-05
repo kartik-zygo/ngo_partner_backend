@@ -21,6 +21,14 @@ export async function getAgoraToken(callId: string, requesterId: string) {
     );
   }
 
+  if (!config.AGORA_APP_ID || !config.AGORA_APP_CERTIFICATE) {
+    throw new AppError(
+      'Voice/video calls are not configured on this server',
+      StatusCodes.SERVICE_UNAVAILABLE,
+      'AGORA_NOT_CONFIGURED',
+    );
+  }
+
   const uid = call.userId === requesterId ? UID_INITIATOR : UID_AGENT;
   const channelName = callId;
 
