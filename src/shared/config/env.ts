@@ -64,6 +64,9 @@ const envSchema = z.object({
   AGORA_APP_CERTIFICATE: z.string().min(1).optional(),
   AGORA_TOKEN_EXPIRY_SECONDS: z.coerce.number().default(3600),
 
+  // Support calls
+  CALL_RINGING_TIMEOUT_SECONDS: z.coerce.number().default(60),
+
   // Ngrok tunnel (dev only — leave blank in production)
   NGROK_AUTHTOKEN: z.string().optional(),
 });

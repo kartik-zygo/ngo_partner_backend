@@ -6,6 +6,7 @@ import { NotFoundError } from '@shared/domain/errors';
 import { assertCallTransition } from '@shared/domain/transitions';
 import { buildPaginationMeta } from '@shared/application/response';
 import { emitToSalesTeam, emitToCall, emitToUser } from '@shared/infrastructure/socket';
+import { config } from '@shared/config/env';
 import type { PaginationQuery } from '@shared/application/common-schemas';
 import type { CallStatus } from '@shared/domain/constants';
 
@@ -62,7 +63,22 @@ export async function createCall(data: z.infer<typeof createCallSchema>, actorId
   const call = await getCall(id);
   // Notify the sales/support team of the incoming call in real time
   emitToSalesTeam('call:incoming', call);
+
+  // Auto-end unanswered calls so the caller isn't stuck on "ringing" forever
+  setTimeout(() => void autoEndIfRinging(id, actorId), config.CALL_RINGING_TIMEOUT_SECONDS * 1000);
+
   return call;
+}
+
+async function autoEndIfRinging(callId: string, userId: string): Promise<void> {
+  const row = await db('support_calls').where({ id: callId }).first<RawCall | undefined>();
+  if (!row || row.status !== 'ringing') return;
+  const now = new Date();
+  await db('support_calls').where({ id: callId }).update({ status: 'ended', ended_at: now, updated_at: now });
+  const updated = await getCall(callId);
+  emitToCall(callId, 'call:status-changed', updated);
+  emitToUser(userId, 'call:status-changed', updated);
+  emitToSalesTeam('call:cancelled', updated);
 }
 
 export async function updateCallStatus(
