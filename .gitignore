@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+*.env
+*.log
+coverage/
+.nyc_output/
+.DS_Store
+Thumbs.db
+*.local
+docs/
+postman/
+DEPLOY.md
+.claude/

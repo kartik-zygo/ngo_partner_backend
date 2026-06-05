@@ -1,0 +1,640 @@
+openapi: '3.0.3'
+info:
+  title: NGO Partners Backend API
+  version: '1.0.0'
+  description: |
+    REST API for two Flutter apps:
+    - **ngo_partner_user** — client-facing app (USER role only)
+    - **ngo_partner_sales** — internal CRM app (SALES + ADMIN roles)
+
+    ## Identity Model
+    There is a single `USER` role for all clients. NGO context is stored as
+    profile fields (`isOrganizationAccount`, `organizationName`, etc.) rather
+    than a separate role. An NGO is simply a USER whose `isOrganizationAccount = true`.
+
+    ## Authentication
+    - JWT Bearer tokens (15 min access / 7 day refresh)
+    - Refresh token rotation — single use, stored as SHA-256 hash
+    - Brute-force lockout after 5 failed attempts (15 min window)
+
+servers:
+  - url: http://localhost:4000/api/v1
+    description: Local development
+
+security:
+  - BearerAuth: []
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    ApiResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+        meta:
+          type: object
+
+    PaginationMeta:
+      type: object
+      properties:
+        total: { type: integer }
+        page: { type: integer }
+        limit: { type: integer }
+        totalPages: { type: integer }
+
+    Error:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string }
+        deviceId: { type: string }
+
+    TokenResponse:
+      type: object
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        expiresIn: { type: integer }
+
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        roles: { type: array, items: { type: string } }
+        isActive: { type: boolean }
+        profile:
+          $ref: '#/components/schemas/UserProfile'
+
+    UserProfile:
+      type: object
+      properties:
+        firstName: { type: string }
+        lastName: { type: string }
+        phone: { type: string }
+        address: { type: string }
+        isOrganizationAccount: { type: boolean }
+        organizationName: { type: string }
+        organizationType: { type: string }
+        organizationRegNumber: { type: string }
+        organizationWebsite: { type: string }
+        organizationDescription: { type: string }
+
+    Service:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        category: { type: string }
+        basePrice: { type: number }
+        description: { type: string }
+        isActive: { type: boolean }
+
+    Lead:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        userId: { type: string }
+        serviceId: { type: string }
+        status:
+          type: string
+          enum: [newLead, contacted, qualified, proposalSent, negotiation, won, lost]
+        source: { type: string }
+        contactName: { type: string }
+        contactEmail: { type: string }
+        version: { type: integer }
+
+    Case:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        userId: { type: string }
+        serviceId: { type: string }
+        status:
+          type: string
+          enum: [submitted, filingInProgress, underReview, resubmitRequired, approved, rejected]
+        version: { type: integer }
+
+    Ticket:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        userId: { type: string }
+        subject: { type: string }
+        priority:
+          type: string
+          enum: [low, medium, high, urgent]
+        status:
+          type: string
+          enum: [open, inProgress, waitingForUser, resolved, closed]
+        escalated: { type: boolean }
+        version: { type: integer }
+
+paths:
+  # ── Auth ────────────────────────────────────────────────────────────────────
+  /auth/login:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Tokens
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - properties:
+                      data: { $ref: '#/components/schemas/TokenResponse' }
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Refresh token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '200':
+          description: New tokens
+        '401':
+          description: Invalid or expired refresh token
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Logout (revoke refresh token)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '204':
+          description: Logged out
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Get current user
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - properties:
+                      data: { $ref: '#/components/schemas/User' }
+
+  /auth/me/profile:
+    patch:
+      tags: [Auth]
+      summary: Update own profile (including NGO fields)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserProfile' }
+      responses:
+        '200':
+          description: Updated user
+
+  # ── Services ─────────────────────────────────────────────────────────────────
+  /services:
+    get:
+      tags: [Services]
+      security: []
+      summary: List active services (public)
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer }
+        - in: query
+          name: limit
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Service list
+    post:
+      tags: [Services]
+      summary: Create service (ADMIN)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, category, basePrice]
+              properties:
+                name: { type: string }
+                category: { type: string }
+                basePrice: { type: number }
+                description: { type: string }
+      responses:
+        '201':
+          description: Created service
+
+  /services/{id}:
+    get:
+      tags: [Services]
+      security: []
+      summary: Get service by id
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Service
+    patch:
+      tags: [Services]
+      summary: Update service (ADMIN)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                basePrice: { type: number }
+      responses:
+        '200':
+          description: Updated service
+
+  /services/{id}/toggle:
+    patch:
+      tags: [Services]
+      summary: Toggle service active status (ADMIN)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Toggled
+
+  # ── Leads ─────────────────────────────────────────────────────────────────────
+  /leads:
+    get:
+      tags: [Leads]
+      summary: List leads (SALES/ADMIN)
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string }
+        - in: query
+          name: assignedTo
+          schema: { type: string }
+        - in: query
+          name: page
+          schema: { type: integer }
+        - in: query
+          name: limit
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Lead list
+    post:
+      tags: [Leads]
+      summary: Create lead (SALES/ADMIN)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [serviceId, contactName, contactEmail, source]
+              properties:
+                serviceId: { type: string }
+                contactName: { type: string }
+                contactEmail: { type: string }
+                source: { type: string }
+      responses:
+        '201':
+          description: Created lead
+
+  /leads/{id}/status:
+    patch:
+      tags: [Leads]
+      summary: Update lead status (SALES/ADMIN)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status, version]
+              properties:
+                status: { type: string }
+                version: { type: integer }
+      responses:
+        '200':
+          description: Updated lead
+        '409':
+          description: Concurrent update conflict
+
+  /leads/{id}/assign:
+    patch:
+      tags: [Leads]
+      summary: Assign lead to sales agent (ADMIN)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [assignedTo]
+              properties:
+                assignedTo: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Assigned
+
+  # ── Cases ─────────────────────────────────────────────────────────────────────
+  /cases:
+    get:
+      tags: [Cases]
+      summary: List cases (USER=own, SALES/ADMIN=all)
+      responses:
+        '200':
+          description: Case list
+    post:
+      tags: [Cases]
+      summary: Submit case (USER)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [serviceId]
+              properties:
+                serviceId: { type: string }
+                leadId: { type: string }
+      responses:
+        '201':
+          description: Created case
+
+  /cases/{id}/status:
+    patch:
+      tags: [Cases]
+      summary: Update case status (SALES/ADMIN)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status, version]
+              properties:
+                status: { type: string }
+                version: { type: integer }
+                rejectionReason: { type: string }
+      responses:
+        '200':
+          description: Updated case
+
+  # ── Tickets ───────────────────────────────────────────────────────────────────
+  /tickets:
+    get:
+      tags: [Tickets]
+      summary: List tickets
+      responses:
+        '200':
+          description: Ticket list
+    post:
+      tags: [Tickets]
+      summary: Create ticket (USER/SALES/ADMIN)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subject, description, priority]
+              properties:
+                subject: { type: string }
+                description: { type: string }
+                priority: { type: string, enum: [low, medium, high, urgent] }
+      responses:
+        '201':
+          description: Created ticket
+
+  /tickets/{id}/assign:
+    patch:
+      tags: [Tickets]
+      summary: Assign ticket (SALES/ADMIN)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [assignedTo]
+              properties:
+                assignedTo: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Assigned
+
+  /tickets/{id}/escalate:
+    patch:
+      tags: [Tickets]
+      summary: Escalate ticket (SALES/ADMIN)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        '200':
+          description: Escalated
+
+  # ── Notifications ──────────────────────────────────────────────────────────────
+  /notifications:
+    get:
+      tags: [Notifications]
+      summary: List notifications for current user
+      responses:
+        '200':
+          description: Notifications
+
+  /notifications/read-all:
+    patch:
+      tags: [Notifications]
+      summary: Mark all notifications as read
+      responses:
+        '204':
+          description: Done
+
+  # ── Dashboard ──────────────────────────────────────────────────────────────────
+  /dashboard/sales:
+    get:
+      tags: [Dashboard]
+      summary: Sales dashboard metrics (SALES/ADMIN)
+      responses:
+        '200':
+          description: Dashboard data
+
+  /dashboard/admin:
+    get:
+      tags: [Dashboard]
+      summary: Admin dashboard metrics (ADMIN)
+      responses:
+        '200':
+          description: Dashboard data
+
+  # ── Revenue Reports ────────────────────────────────────────────────────────────
+  /reports/revenue:
+    get:
+      tags: [Reports]
+      summary: List revenue records (SALES/ADMIN)
+      parameters:
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: Revenue records
+
+  /reports/export:
+    post:
+      tags: [Reports]
+      summary: Request a report export (SALES/ADMIN)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reportType]
+              properties:
+                reportType:
+                  type: string
+                  enum: [revenue, leads, cases, tickets]
+      responses:
+        '201':
+          description: Export record created
+
+  # ── Audit ──────────────────────────────────────────────────────────────────────
+  /audit/logs:
+    get:
+      tags: [Audit]
+      summary: Query audit logs (ADMIN)
+      parameters:
+        - in: query
+          name: entityType
+          schema: { type: string }
+        - in: query
+          name: entityId
+          schema: { type: string }
+        - in: query
+          name: actorId
+          schema: { type: string }
+      responses:
+        '200':
+          description: Audit log entries
+
+  # ── Health ─────────────────────────────────────────────────────────────────────
+  /health/live:
+    get:
+      tags: [Health]
+      security: []
+      summary: Liveness probe
+      responses:
+        '200':
+          description: alive
+
+  /health/ready:
+    get:
+      tags: [Health]
+      security: []
+      summary: Readiness probe (checks DB)
+      responses:
+        '200':
+          description: ready
+        '503':
+          description: DB unavailable
