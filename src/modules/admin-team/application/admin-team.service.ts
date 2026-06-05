@@ -97,9 +97,8 @@ export class AdminTeamService {
       });
 
       const salesRole = await trx('roles').where({ name: ROLES.SALES }).first<{ id: string }>();
-      if (salesRole) {
-        await trx('user_roles').insert({ id: uuidv4(), user_id: userId, role_id: salesRole.id });
-      }
+      if (!salesRole) throw new Error('SALES role not found — run migrations to seed base roles');
+      await trx('user_roles').insert({ id: uuidv4(), user_id: userId, role_id: salesRole.id });
 
       await trx('user_profiles').insert({
         id: uuidv4(),
