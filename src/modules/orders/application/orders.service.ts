@@ -6,7 +6,7 @@ import { NotFoundError, ForbiddenError, ValidationError } from '@shared/domain/e
 import { buildPaginationMeta } from '@shared/application/response';
 import { config } from '@shared/config/env';
 import * as cashfree from '../infrastructure/cashfree.adapter';
-import type { CreateOrderInput, ListOrdersQuery } from './orders.schemas';
+import type { CreateOrderInput, ListOrdersQuery, UpdateFulfillmentInput, FulfillmentStatus } from './orders.schemas';
 
 export type OrderStatus = 'pending' | 'paid' | 'failed' | 'cancelled' | 'expired';
 
@@ -24,6 +24,11 @@ export interface OrderRecord {
   customerEmail: string | null;
   customerPhone: string | null;
   notes: string | null;
+  // Fulfillment fields (admin/sales managed)
+  fulfillmentStatus: FulfillmentStatus | null;
+  adminNotes: string | null;
+  fulfillmentUpdatedBy: string | null;
+  fulfillmentUpdatedAt: Date | null;
   paidAt: Date | null;
   expiresAt: Date | null;
   createdAt: Date;
@@ -59,6 +64,10 @@ interface RawOrder {
   customer_email: string | null;
   customer_phone: string | null;
   notes: string | null;
+  fulfillment_status: FulfillmentStatus | null;
+  admin_notes: string | null;
+  fulfillment_updated_by: string | null;
+  fulfillment_updated_at: string | null;
   paid_at: string | null;
   expires_at: string | null;
   created_at: string;
@@ -95,6 +104,10 @@ function mapOrder(r: RawOrder): OrderRecord {
     customerEmail: r.customer_email,
     customerPhone: r.customer_phone,
     notes: r.notes,
+    fulfillmentStatus: r.fulfillment_status,
+    adminNotes: r.admin_notes,
+    fulfillmentUpdatedBy: r.fulfillment_updated_by,
+    fulfillmentUpdatedAt: r.fulfillment_updated_at ? new Date(r.fulfillment_updated_at) : null,
     paidAt: r.paid_at ? new Date(r.paid_at) : null,
     expiresAt: r.expires_at ? new Date(r.expires_at) : null,
     createdAt: new Date(r.created_at),
@@ -133,7 +146,6 @@ export async function createOrder(
   input: CreateOrderInput,
   userId: string,
 ): Promise<OrderRecord & { paymentSessionId: string }> {
-  // Fetch service
   const service = await db('services')
     .where({ id: input.serviceId })
     .whereNull('deleted_at')
@@ -145,17 +157,11 @@ export async function createOrder(
     throw new ValidationError('This service does not have a price configured yet');
   }
 
-  // Fetch user profile for customer details
   const userRow = await db('users as u')
     .leftJoin('user_profiles as p', 'p.user_id', 'u.id')
     .where('u.id', userId)
     .select<
-      | {
-          email: string;
-          first_name: string | null;
-          last_name: string | null;
-          phone: string | null;
-        }
+      | { email: string; first_name: string | null; last_name: string | null; phone: string | null }
       | undefined
     >('u.email', 'p.first_name', 'p.last_name', 'p.phone')
     .first();
@@ -175,7 +181,6 @@ export async function createOrder(
   const orderId = uuidv4();
   const amount = parseFloat(service.base_price);
 
-  // Persist order as pending first
   await db('service_orders').insert({
     id: orderId,
     user_id: userId,
@@ -190,7 +195,6 @@ export async function createOrder(
     created_by: userId,
   });
 
-  // Create order on Cashfree
   const notifyUrl = config.CASHFREE_WEBHOOK_NOTIFY_URL ?? `${config.APP_URL}/api/v1/orders/webhook`;
   const returnUrl = `${config.APP_URL}/api/v1/orders/return?order_id={order_id}`;
 
@@ -207,12 +211,10 @@ export async function createOrder(
       notifyUrl,
     });
   } catch (err) {
-    // Roll back the DB record so the user can retry
     await db('service_orders').where({ id: orderId }).delete();
     throw err;
   }
 
-  // Update order with Cashfree IDs
   await db('service_orders').where({ id: orderId }).update({
     cashfree_order_id: cfResult.cfOrderId,
     payment_session_id: cfResult.paymentSessionId,
@@ -225,14 +227,41 @@ export async function createOrder(
 }
 
 export async function listOrders(
-  userId: string,
   query: ListOrdersQuery,
+  callerUserId: string,
+  isInternalUser: boolean,
 ): Promise<{ data: OrderRecord[]; meta: ReturnType<typeof buildPaginationMeta> }> {
-  const base = db('service_orders as o')
-    .join('services as s', 's.id', 'o.service_id')
-    .where('o.user_id', userId);
+  const base = db('service_orders as o').join('services as s', 's.id', 'o.service_id');
+
+  // Users only see their own orders; admin/sales see all
+  if (!isInternalUser) {
+    base.where('o.user_id', callerUserId);
+  }
 
   if (query.status) base.where('o.status', query.status);
+
+  if (query.fulfillmentStatus) {
+    if (query.fulfillmentStatus === 'none') {
+      base.whereNull('o.fulfillment_status');
+    } else {
+      base.where('o.fulfillment_status', query.fulfillmentStatus);
+    }
+  }
+
+  // Admin-only filters — silently ignored for non-internal callers
+  if (isInternalUser) {
+    if (query.serviceId) base.where('o.service_id', query.serviceId);
+    if (query.userId) base.where('o.user_id', query.userId);
+    if (query.from) base.where('o.created_at', '>=', new Date(query.from));
+    if (query.to) base.where('o.created_at', '<=', new Date(query.to));
+    if (query.search) {
+      const term = `%${query.search.toLowerCase()}%`;
+      base.whereRaw(
+        '(LOWER(o.customer_name) LIKE ? OR LOWER(o.customer_email) LIKE ? OR o.customer_phone LIKE ?)',
+        [term, term, term],
+      );
+    }
+  }
 
   const total = await base.clone().count<{ count: string }[]>('o.id as count').first();
   const rows = await base
@@ -248,9 +277,15 @@ export async function listOrders(
   };
 }
 
-export async function getOrderById(id: string, userId: string, isAdmin = false): Promise<OrderRecord & { transactions: PaymentTransactionRecord[] }> {
+export async function getOrderById(
+  id: string,
+  callerUserId: string,
+  isInternalUser = false,
+): Promise<OrderRecord & { transactions: PaymentTransactionRecord[] }> {
   const row = await getOrderRow(id);
-  if (!isAdmin && row.user_id !== userId) throw new ForbiddenError('You do not have access to this order');
+  if (!isInternalUser && row.user_id !== callerUserId) {
+    throw new ForbiddenError('You do not have access to this order');
+  }
 
   const txRows = await db('payment_transactions')
     .where({ order_id: id })
@@ -260,8 +295,33 @@ export async function getOrderById(id: string, userId: string, isAdmin = false):
   return { ...mapOrder(row), transactions: txRows.map(mapTransaction) };
 }
 
-// Called by the Cashfree webhook handler.
-// rawBody must be the exact bytes received (before JSON parse).
+// Admin/sales: update fulfillment status and internal notes after payment.
+export async function updateFulfillment(
+  id: string,
+  input: UpdateFulfillmentInput,
+  actorId: string,
+): Promise<OrderRecord> {
+  const row = await getOrderRow(id);
+
+  // Fulfillment only makes sense on paid orders
+  if (row.status !== 'paid') {
+    throw new ValidationError(
+      `Cannot update fulfillment on an order with payment status '${row.status}'. Order must be paid first.`,
+    );
+  }
+
+  await db('service_orders').where({ id }).update({
+    fulfillment_status: input.fulfillmentStatus,
+    ...(input.adminNotes !== undefined && { admin_notes: input.adminNotes }),
+    fulfillment_updated_by: actorId,
+    fulfillment_updated_at: new Date(),
+    updated_at: new Date(),
+  });
+
+  return mapOrder(await getOrderRow(id));
+}
+
+// Webhook handler — called by Cashfree with payment result.
 export async function processWebhook(
   rawBody: string,
   signature: string,
@@ -302,7 +362,6 @@ export async function processWebhook(
       ? Object.keys(rawPaymentMethod)[0] ?? null
       : null;
 
-  // Idempotency: skip if this payment transaction was already recorded
   if (cfPaymentId) {
     const existing = await db('payment_transactions').where({ cashfree_payment_id: cfPaymentId }).first();
     if (existing) {
@@ -311,24 +370,19 @@ export async function processWebhook(
     }
   }
 
-  // Find our order
-  const order = await db('service_orders').where({ id: ourOrderId }).first<{ id: string; status: OrderStatus } | undefined>();
+  const order = await db('service_orders')
+    .where({ id: ourOrderId })
+    .first<{ id: string; status: OrderStatus } | undefined>();
   if (!order) {
     logger.warn({ ourOrderId }, 'Cashfree webhook: order not found');
     return;
   }
 
-  // Map Cashfree payment status to our order status
   let newOrderStatus: OrderStatus | null = null;
-  if (paymentStatus === 'SUCCESS') {
-    newOrderStatus = 'paid';
-  } else if (paymentStatus === 'FAILED') {
-    newOrderStatus = 'failed';
-  }
-  // USER_DROPPED or PENDING: leave order as pending (user can retry)
+  if (paymentStatus === 'SUCCESS') newOrderStatus = 'paid';
+  else if (paymentStatus === 'FAILED') newOrderStatus = 'failed';
 
   await db.transaction(async (trx) => {
-    // Insert payment transaction record
     await trx('payment_transactions').insert({
       id: uuidv4(),
       order_id: ourOrderId,
@@ -344,10 +398,11 @@ export async function processWebhook(
       raw_webhook: JSON.stringify(payload),
     });
 
-    // Update order status if it should transition
     if (newOrderStatus && order.status === 'pending') {
       await trx('service_orders').where({ id: ourOrderId }).update({
         status: newOrderStatus,
+        // Auto-set fulfillment to 'processing' when payment succeeds
+        ...(newOrderStatus === 'paid' && { fulfillment_status: 'processing' }),
         paid_at: paymentStatus === 'SUCCESS' ? new Date() : null,
         updated_at: new Date(),
       });

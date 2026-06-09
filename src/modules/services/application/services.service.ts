@@ -1,9 +1,9 @@
 import { v4 as uuidv4 } from 'uuid';
 
 import { db } from '@shared/infrastructure/database';
-import { NotFoundError } from '@shared/domain/errors';
+import { NotFoundError, ConflictError } from '@shared/domain/errors';
 import { buildPaginationMeta } from '@shared/application/response';
-import type { PaginationQuery } from '@shared/application/common-schemas';
+import type { ListServicesQuery } from './services.schemas';
 
 export interface ServiceRecord {
   id: string;
@@ -41,23 +41,36 @@ function mapService(r: RawService): ServiceRecord {
 }
 
 export async function listServices(
-  pagination: PaginationQuery,
-  activeOnly = true,
+  query: ListServicesQuery,
+  isAdmin = false,
 ): Promise<{ data: ServiceRecord[]; meta: ReturnType<typeof buildPaginationMeta> }> {
-  const query = db('services').whereNull('deleted_at');
-  if (activeOnly) query.where({ is_active: true });
+  const q = db('services').whereNull('deleted_at');
 
-  const total = await query.clone().count<{ count: string }[]>('id as count').first();
-  const rows = await query
+  // Non-admins only see active services; admins can request inactive ones too
+  if (!isAdmin || !query.includeInactive) {
+    q.where({ is_active: true });
+  }
+
+  if (query.category) {
+    q.where('category', query.category);
+  }
+
+  if (query.search) {
+    const term = `%${query.search.toLowerCase()}%`;
+    q.whereRaw('(LOWER(name) LIKE ? OR LOWER(description) LIKE ?)', [term, term]);
+  }
+
+  const total = await q.clone().count<{ count: string }[]>('id as count').first();
+  const rows = await q
     .clone()
     .orderBy('created_at', 'desc')
-    .limit(pagination.limit)
-    .offset((pagination.page - 1) * pagination.limit)
+    .limit(query.limit)
+    .offset((query.page - 1) * query.limit)
     .select<RawService[]>('*');
 
   return {
     data: rows.map(mapService),
-    meta: buildPaginationMeta(parseInt(String(total?.count ?? 0)), pagination.page, pagination.limit),
+    meta: buildPaginationMeta(parseInt(String(total?.count ?? 0)), query.page, query.limit),
   };
 }
 
@@ -90,7 +103,7 @@ export async function updateService(
   data: { name?: string; description?: string; category?: string; basePrice?: number },
   actorId: string,
 ): Promise<ServiceRecord> {
-  await getServiceById(id); // throws if not found
+  await getServiceById(id); // throws if not found / deleted
   await db('services').where({ id }).update({
     ...(data.name !== undefined && { name: data.name }),
     ...(data.description !== undefined && { description: data.description }),
@@ -110,4 +123,36 @@ export async function toggleService(id: string, actorId: string): Promise<Servic
     updated_at: new Date(),
   });
   return getServiceById(id);
+}
+
+export async function deleteService(id: string, actorId: string): Promise<void> {
+  await getServiceById(id); // throws if already deleted
+
+  // Prevent deleting a service that has pending/paid orders
+  const activeOrder = await db('service_orders')
+    .where({ service_id: id })
+    .whereIn('status', ['pending', 'paid'])
+    .first<{ id: string } | undefined>('id');
+
+  if (activeOrder) {
+    throw new ConflictError(
+      'Cannot delete a service that has active or paid orders. Deactivate it instead.',
+    );
+  }
+
+  await db('services').where({ id }).update({
+    deleted_at: new Date(),
+    updated_by: actorId,
+    updated_at: new Date(),
+  });
+}
+
+export async function listCategories(): Promise<string[]> {
+  const rows = await db('services')
+    .whereNull('deleted_at')
+    .whereNotNull('category')
+    .distinct('category')
+    .orderBy('category')
+    .pluck<string[]>('category');
+  return rows;
 }

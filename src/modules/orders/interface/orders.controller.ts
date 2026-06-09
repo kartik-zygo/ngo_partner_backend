@@ -3,8 +3,13 @@ import { StatusCodes } from 'http-status-codes';
 
 import { buildResponse } from '@shared/application/response';
 
-import { createOrderSchema, listOrdersQuerySchema } from '../application/orders.schemas';
+import { createOrderSchema, listOrdersQuerySchema, updateFulfillmentSchema } from '../application/orders.schemas';
 import * as svc from '../application/orders.service';
+
+function isInternal(req: Request): boolean {
+  const roles = req.user?.roles ?? [];
+  return roles.includes('ADMIN') || roles.includes('SALES');
+}
 
 export async function createOrder(req: Request, res: Response): Promise<void> {
   const input = createOrderSchema.parse(req.body);
@@ -14,18 +19,35 @@ export async function createOrder(req: Request, res: Response): Promise<void> {
 
 export async function listOrders(req: Request, res: Response): Promise<void> {
   const query = listOrdersQuerySchema.parse(req.query);
-  const result = await svc.listOrders(req.user!.sub, query);
-  res.status(StatusCodes.OK).json(buildResponse(result.data, result.meta));
+  const result = await svc.listOrders(query, req.user!.sub, isInternal(req));
+
+  // Strip adminNotes from response for non-internal callers
+  const data = isInternal(req)
+    ? result.data
+    : result.data.map(({ adminNotes: _a, fulfillmentUpdatedBy: _b, fulfillmentUpdatedAt: _c, ...rest }) => rest);
+
+  res.status(StatusCodes.OK).json(buildResponse(data, result.meta));
 }
 
 export async function getOrder(req: Request, res: Response): Promise<void> {
-  const isAdmin = req.user!.roles.includes('ADMIN');
-  const order = await svc.getOrderById(req.params['id']!, req.user!.sub, isAdmin);
+  const order = await svc.getOrderById(req.params['id']!, req.user!.sub, isInternal(req));
+
+  // Strip internal-only fields for regular users
+  if (!isInternal(req)) {
+    const { adminNotes: _a, fulfillmentUpdatedBy: _b, fulfillmentUpdatedAt: _c, ...safeOrder } = order;
+    res.status(StatusCodes.OK).json(buildResponse(safeOrder));
+    return;
+  }
+
   res.status(StatusCodes.OK).json(buildResponse(order));
 }
 
-// Cashfree webhook — no authentication, uses signature verification internally.
-// express.json() must have the verify callback set so req.rawBody is available.
+export async function updateFulfillment(req: Request, res: Response): Promise<void> {
+  const input = updateFulfillmentSchema.parse(req.body);
+  const order = await svc.updateFulfillment(req.params['id']!, input, req.user!.sub);
+  res.status(StatusCodes.OK).json(buildResponse(order));
+}
+
 export async function cashfreeWebhook(req: Request, res: Response): Promise<void> {
   const signature = req.headers['x-webhook-signature'] as string | undefined;
   const timestamp = req.headers['x-webhook-timestamp'] as string | undefined;
@@ -37,15 +59,12 @@ export async function cashfreeWebhook(req: Request, res: Response): Promise<void
     return;
   }
 
-  // Respond 200 immediately to prevent Cashfree retries, then process
   res.status(StatusCodes.OK).json({ received: true });
   await svc.processWebhook(rawBody, signature, timestamp);
 }
 
-// Cashfree return URL — user's browser lands here after payment completes in WebView.
-// Returns JSON so the Flutter WebView JS bridge can detect the redirect.
-export async function paymentReturn(req: Request, res: Response): Promise<void> {
-  const orderId = req.query['order_id'] as string | undefined;
+export async function paymentReturn(_req: Request, res: Response): Promise<void> {
+  const orderId = _req.query['order_id'] as string | undefined;
   res.status(StatusCodes.OK).json({
     success: true,
     data: { message: 'Payment flow complete. Check your order status.', orderId: orderId ?? null },

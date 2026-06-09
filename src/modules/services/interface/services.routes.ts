@@ -9,8 +9,13 @@ import * as ctrl from './services.controller';
 
 export const servicesRouter = Router();
 
+// Public / authenticated — list & detail
 servicesRouter.get('/', ctrl.list);
+servicesRouter.get('/categories', ctrl.categories);
 servicesRouter.get('/:id', validate(uuidParam, 'params'), ctrl.getById);
+
+// ADMIN only — create, update, toggle, delete
 servicesRouter.post('/', authenticate, authorize('ADMIN'), validate(createServiceSchema), ctrl.create);
 servicesRouter.patch('/:id', authenticate, authorize('ADMIN'), validate(uuidParam, 'params'), validate(updateServiceSchema), ctrl.update);
 servicesRouter.patch('/:id/toggle', authenticate, authorize('ADMIN'), validate(uuidParam, 'params'), ctrl.toggle);
+servicesRouter.delete('/:id', authenticate, authorize('ADMIN'), validate(uuidParam, 'params'), ctrl.remove);

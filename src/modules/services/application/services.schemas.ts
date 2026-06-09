@@ -8,5 +8,19 @@ export const createServiceSchema = z.object({
 });
 
 export const updateServiceSchema = createServiceSchema.partial();
+
+export const listServicesQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  category: z.string().max(100).optional(),
+  search: z.string().max(255).optional(),
+  // ADMIN only — when true returns inactive services too
+  includeInactive: z
+    .string()
+    .transform((v) => v === 'true')
+    .optional(),
+});
+
 export type CreateServiceDto = z.infer<typeof createServiceSchema>;
 export type UpdateServiceDto = z.infer<typeof updateServiceSchema>;
+export type ListServicesQuery = z.infer<typeof listServicesQuerySchema>;
