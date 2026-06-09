@@ -2,7 +2,9 @@ import { RtcTokenBuilder, RtcRole } from 'agora-token';
 import { StatusCodes } from 'http-status-codes';
 
 import { config } from '@shared/config/env';
+import { db } from '@shared/infrastructure/database';
 import { AppError } from '@shared/domain/errors';
+import { emitToCall, emitToUser } from '@shared/infrastructure/socket';
 
 import { getCall } from './support-calls.service';
 
@@ -11,7 +13,7 @@ const UID_INITIATOR = 1;
 const UID_AGENT = 2;
 
 export async function getAgoraToken(callId: string, requesterId: string) {
-  const call = await getCall(callId);
+  let call = await getCall(callId);
 
   if (!['ringing', 'accepted'].includes(call.status)) {
     throw new AppError(
@@ -29,7 +31,24 @@ export async function getAgoraToken(callId: string, requesterId: string) {
     );
   }
 
-  const uid = call.userId === requesterId ? UID_INITIATOR : UID_AGENT;
+  const isAgent = call.userId !== requesterId;
+
+  // When an agent fetches the token for a ringing call, auto-accept it so the
+  // caller's app transitions out of the ringing screen immediately.
+  if (isAgent && call.status === 'ringing') {
+    const now = new Date();
+    await db('support_calls').where({ id: callId }).update({
+      status: 'accepted',
+      accepted_by: requesterId,
+      accepted_at: now,
+      updated_at: now,
+    });
+    call = await getCall(callId);
+    emitToCall(callId, 'call:status-changed', call);
+    emitToUser(call.userId, 'call:status-changed', call);
+  }
+
+  const uid = isAgent ? UID_AGENT : UID_INITIATOR;
   const channelName = callId;
 
   const token = RtcTokenBuilder.buildTokenWithUid(

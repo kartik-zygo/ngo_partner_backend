@@ -55,6 +55,23 @@ export async function listCalls(pagination: PaginationQuery, userId?: string) {
 }
 
 export async function createCall(data: z.infer<typeof createCallSchema>, actorId: string) {
+  // Cancel any previous ringing calls from this user so agents don't accept a stale call
+  const stale = await db('support_calls')
+    .where({ user_id: actorId, status: 'ringing' })
+    .select<RawCall[]>('*');
+  if (stale.length > 0) {
+    const now = new Date();
+    await db('support_calls')
+      .where({ user_id: actorId, status: 'ringing' })
+      .update({ status: 'ended', ended_at: now, updated_at: now });
+    for (const s of stale) {
+      const cancelled = mapCall({ ...s, status: 'ended', ended_at: now.toISOString(), updated_at: now.toISOString() });
+      emitToSalesTeam('call:cancelled', cancelled);
+      emitToCall(s.id, 'call:status-changed', cancelled);
+      emitToUser(actorId, 'call:status-changed', cancelled);
+    }
+  }
+
   const id = uuidv4();
   await db('support_calls').insert({
     id, user_id: actorId, ticket_id: data.ticketId ?? null,
