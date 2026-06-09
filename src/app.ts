@@ -25,6 +25,7 @@ import { dashboardsRouter } from '@modules/dashboards/interface/dashboards.route
 import { reportsRouter } from '@modules/revenue-reports/interface/reports.routes';
 import { auditRouter } from '@modules/audit/interface/audit.routes';
 import { adminTeamRouter } from '@modules/admin-team/interface/admin-team.routes';
+import { ordersRouter } from '@modules/orders/interface/orders.routes';
 
 export function createApp(): express.Application {
   const app = express();
@@ -69,7 +70,17 @@ export function createApp(): express.Application {
   });
 
   // ── Body parsing ────────────────────────────────────────────────────────────
-  app.use(express.json({ limit: config.REQUEST_SIZE_LIMIT }));
+  // The verify callback stores the raw buffer as req.rawBody — required for
+  // Cashfree webhook signature verification (HMAC over the raw bytes).
+  app.use(
+    express.json({
+      limit: config.REQUEST_SIZE_LIMIT,
+      verify: (req, _res, buf) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (req as any).rawBody = buf.toString('utf8');
+      },
+    }),
+  );
   app.use(express.urlencoded({ extended: true, limit: config.REQUEST_SIZE_LIMIT }));
   app.use(compression());
 
@@ -133,6 +144,7 @@ export function createApp(): express.Application {
   app.use(`${prefix}/reports`, reportsRouter);
   app.use(`${prefix}/audit`, auditRouter);
   app.use(`${prefix}/admin/team`, adminTeamRouter);
+  app.use(`${prefix}/orders`, ordersRouter);
 
   // ── 404 handler ─────────────────────────────────────────────────────────────
   app.use((_req, res) => {

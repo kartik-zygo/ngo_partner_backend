@@ -69,6 +69,14 @@ const envSchema = z.object({
 
   // Ngrok tunnel (dev only — leave blank in production)
   NGROK_AUTHTOKEN: z.string().optional(),
+
+  // Cashfree Payment Gateway (leave blank to disable payments)
+  CASHFREE_APP_ID: z.string().min(1).optional(),
+  CASHFREE_SECRET_KEY: z.string().min(1).optional(),
+  // sandbox | production  (default: sandbox)
+  CASHFREE_ENVIRONMENT: z.enum(['sandbox', 'production']).default('sandbox'),
+  // Override the webhook URL Cashfree calls (useful when running behind ngrok)
+  CASHFREE_WEBHOOK_NOTIFY_URL: z.string().url().optional(),
 });
 
 function loadEnv(): z.infer<typeof envSchema> {
